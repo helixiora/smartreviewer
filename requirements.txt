@@ -1,3 +1,18 @@
-openai>=1.0.0
-PyGithub>=2.1.1
-python-dotenv>=1.0.0 
+# Core dependencies
+openai==1.59.7
+PyGithub==2.5.0
+python-dotenv==1.0.1
+PyYAML==6.0.2
+tenacity==9.0.0
+
+# Development dependencies
+pytest==8.3.4
+pytest-cov==6.0.0
+ruff==0.3.3
+pylint==3.3.3
+bandit==1.8.2
+pre-commit==4.0.1
+
+# Type stubs for development
+types-PyYAML==6.0.12.12
+types-requests==2.31.0.20240125

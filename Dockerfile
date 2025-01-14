@@ -9,4 +9,4 @@ COPY . .
 
 RUN chmod +x /app/review.py
 
-ENTRYPOINT ["/app/review.py"] 
+ENTRYPOINT ["/app/review.py"]
