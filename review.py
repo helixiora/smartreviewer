@@ -101,6 +101,14 @@ def main():
     max_files = int(get_optional_env("MAX_FILES", "50"))
     exclude_patterns = get_optional_env("EXCLUDE_PATTERNS", "").split("\n")
 
+    logger.info("Configuration loaded:")
+    logger.info("- Repository: %s", repo_name)
+    logger.info("- PR Number: %s", pr_number)
+    logger.info("- Model: %s", model)
+    logger.info("- Review Type: %s", review_comment_type)
+    logger.info("- Max Files: %d", max_files)
+    logger.info("- Exclude Patterns: %s", exclude_patterns)
+
     try:
         pr_number = int(pr_number)
     except ValueError:
@@ -117,7 +125,9 @@ def main():
 
     try:
         repo: Repository = g.get_repo(repo_name)
+        logger.info("Successfully accessed repository: %s", repo.full_name)
         pr: PullRequest = repo.get_pull(pr_number)
+        logger.info("Successfully accessed PR #%d: %s", pr_number, pr.title)
     except UnknownObjectException:
         logger.error("Could not find PR #%s in repository %s", pr_number, repo_name)
         sys.exit(1)
@@ -131,7 +141,9 @@ def main():
     code_snippets = []
     files_reviewed = 0
     try:
-        for file in pr.get_files():
+        files = list(pr.get_files())
+        logger.info("Found %d files in PR", len(files))
+        for file in files:
             if files_reviewed >= max_files:
                 logger.warning(
                     "Reached maximum file limit (%d). Skipping remaining files.", max_files
@@ -146,22 +158,30 @@ def main():
             if file.patch:
                 code_snippets.append(f"File: {file.filename}\n{file.patch}")
                 files_reviewed += 1
+                logger.debug("Patch for %s: %s", file.filename, file.patch)
+            else:
+                logger.warning("No patch available for file: %s", file.filename)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Error collecting code diffs: %s", str(e))
         sys.exit(1)
 
+    logger.info("Collected snippets from %d files", files_reviewed)
     # Set files_reviewed output
     set_output("files_reviewed", str(files_reviewed))
 
     # Collect commit messages
     try:
-        commit_messages = [commit.commit.message for commit in pr.get_commits()]
+        commits = list(pr.get_commits())
+        logger.info("Found %d commits", len(commits))
+        commit_messages = [commit.commit.message for commit in commits]
+        logger.info("Commit messages: %s", commit_messages)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Error collecting commit messages: %s", str(e))
         sys.exit(1)
 
     # Collect PR description
     pr_description = pr.body or ""
+    logger.info("PR description length: %d characters", len(pr_description))
 
     # Create the prompt for OpenAI based on review type
     if review_comment_type == "summarized":
@@ -219,6 +239,8 @@ def main():
             ],
         )
         review_comments = response.choices[0].message.content
+        logger.info("Received review response of length: %d", len(review_comments))
+        logger.debug("Review response: %s", review_comments)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Error getting review from OpenAI: %s", str(e))
         sys.exit(1)
@@ -229,8 +251,10 @@ def main():
     for line in review_comments.split("\n"):
         if line.startswith("VERDICT:"):
             verdict = line.replace("VERDICT:", "").strip().lower()
+            logger.info("Review verdict: %s", verdict)
         elif line.startswith("SUMMARY:"):
             summary = line.replace("SUMMARY:", "").strip()
+            logger.info("Review summary length: %d", len(summary))
 
     # Set outputs
     set_output("review_result", verdict)
@@ -239,20 +263,26 @@ def main():
     # Post review based on type
     try:
         if review_comment_type == "summarized":
+            logger.info("Posting summarized review")
+            latest_commit = pr.get_commits().reversed[0]
+            logger.info("Latest commit: %s", latest_commit.sha)
             # Post a single review with the summary
             pr.create_review(
                 body=review_comments,
-                commit=pr.get_commits().reversed[0].sha,
+                commit=latest_commit.sha,
                 event=verdict.upper()
                 if verdict in ["approved", "changes_requested"]
                 else "COMMENT",
             )
         else:
+            logger.info("Posting individual review comments")
             # Parse and post individual comments
             current_file = None
             current_line = None
             current_comment = []
             review_body = []
+            latest_commit = pr.get_commits().reversed[0]
+            logger.info("Latest commit: %s", latest_commit.sha)
 
             for line in review_comments.split("\n"):
                 line = line.strip()
@@ -264,12 +294,14 @@ def main():
                     if current_file and current_line and current_comment:
                         comment_text = "\n".join(current_comment)
                         try:
+                            logger.info("Posting comment for %s:%d", current_file, current_line)
                             pr.create_review_comment(
                                 body=comment_text,
-                                commit=pr.get_commits().reversed[0].sha,
+                                commit=latest_commit.sha,
                                 path=current_file,
                                 line=current_line,
                             )
+                            logger.info("Successfully posted comment")
                         except Exception as e:
                             logger.warning(
                                 "Failed to post comment on %s:%s: %s",
@@ -292,12 +324,14 @@ def main():
             if current_file and current_line and current_comment:
                 comment_text = "\n".join(current_comment)
                 try:
+                    logger.info("Posting final comment for %s:%d", current_file, current_line)
                     pr.create_review_comment(
                         body=comment_text,
-                        commit=pr.get_commits().reversed[0].sha,
+                        commit=latest_commit.sha,
                         path=current_file,
                         line=current_line,
                     )
+                    logger.info("Successfully posted final comment")
                 except Exception as e:
                     logger.warning(
                         "Failed to post comment on %s:%s: %s",
@@ -308,16 +342,26 @@ def main():
                     review_body.append(f"{current_file}:{current_line} - {comment_text}")
 
             # Create the final review with verdict
-            pr.create_review(
-                body="\n\n".join(review_body),
-                commit=pr.get_commits().reversed[0].sha,
-                event=verdict.upper()
-                if verdict in ["approved", "changes_requested"]
-                else "COMMENT",
-            )
+            try:
+                logger.info("Creating final review with verdict: %s", verdict)
+                logger.info("Review body length: %d", len("\n\n".join(review_body)))
+                pr.create_review(
+                    body="\n\n".join(review_body),
+                    commit=latest_commit.sha,
+                    event=verdict.upper()
+                    if verdict in ["approved", "changes_requested"]
+                    else "COMMENT",
+                )
+                logger.info("Successfully posted final review")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Error posting review. Details: %s", str(e))
+                logger.error("Review body: %s", "\n\n".join(review_body))
+                logger.error("Verdict: %s", verdict)
+                logger.error("Commit SHA: %s", latest_commit.sha)
+                sys.exit(1)
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Error posting review: %s", str(e))
+        logger.error("Error in review process: %s", str(e))
         sys.exit(1)
 
 
