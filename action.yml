@@ -1,6 +1,10 @@
-name: 'AI Pull Request Reviewer'
+name: 'helixiora-ai-pr-reviewer'
 description: 'Automatically review pull requests using AI to provide detailed feedback and suggestions for improvements'
 author: 'helixiora'
+
+branding:
+  icon: 'git-pull-request'
+  color: 'purple'
 
 inputs:
   openai_api_key:

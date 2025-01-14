@@ -1,6 +1,9 @@
-# AI Pull Request Reviewer
+# Helixiora AI PR Reviewer
 
-<!-- Testing CI workflow -->
+[![Version](https://img.shields.io/badge/version-1.2.4-blue.svg)](https://github.com/helixiora/smartreviewer/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-Helixiora%20AI%20PR%20Reviewer-blue)](https://github.com/marketplace/actions/helixiora-ai-pr-reviewer)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 A GitHub Action that automatically reviews pull requests using AI to provide detailed, actionable
 feedback. The action uses OpenAI's GPT-4-Turbo model to analyze code changes and provide specific,
