@@ -6,18 +6,6 @@ inputs:
   openai_api_key:
     description: 'OpenAI API key'
     required: true
-  repo_name:
-    description: 'Repository name in format owner/repo'
-    required: false
-    default: ${{ github.repository }}
-  pr_number:
-    description: 'Pull request number to review'
-    required: false
-    default: ${{ github.event.pull_request.number }}
-  dry_run:
-    description: 'Run in dry-run mode (will not post comments)'
-    required: false
-    default: 'false'
 
 runs:
   using: 'docker'
@@ -25,6 +13,5 @@ runs:
   env:
     GITHUB_TOKEN: ${{ github.token }}
     OPENAI_API_KEY: ${{ inputs.openai_api_key }}
-    REPO_NAME: ${{ inputs.repo_name }}
-    PR_NUMBER: ${{ inputs.pr_number }}
-    DRY_RUN: ${{ inputs.dry_run }}
+    REPO_NAME: ${{ github.repository }}
+    PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
