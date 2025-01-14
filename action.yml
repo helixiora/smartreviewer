@@ -37,6 +37,16 @@ inputs:
       Example: "*.md\n*.lock\ngenerated/*"
     required: false
 
+  repository:
+    description: 'GitHub repository name'
+    required: true
+    default: ${{ github.repository }}
+
+  pr_or_issue_number:
+    description: 'Pull request or issue number'
+    required: true
+    default: ${{ github.event.pull_request.number || github.event.issue.number }}
+
 outputs:
   review_result:
     description: 'The overall result of the review (approved, commented, or changes_requested)'
@@ -53,8 +63,8 @@ runs:
   env:
     GITHUB_TOKEN: ${{ inputs.github_token }}
     OPENAI_API_KEY: ${{ inputs.openai_api_key }}
-    REPO_NAME: ${{ github.repository }}
-    PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+    REPO_NAME: ${{ inputs.repository }}
+    PR_NUMBER: ${{ inputs.pr_or_issue_number }}
     MODEL: ${{ inputs.model }}
     REVIEW_COMMENT_TYPE: ${{ inputs.review_comment_type }}
     MAX_FILES: ${{ inputs.max_files }}
