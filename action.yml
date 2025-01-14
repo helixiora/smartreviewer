@@ -58,14 +58,28 @@ outputs:
     description: 'Number of files that were reviewed'
 
 runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  env:
-    GITHUB_TOKEN: ${{ inputs.github_token }}
-    OPENAI_API_KEY: ${{ inputs.openai_api_key }}
-    REPO_NAME: ${{ inputs.repository }}
-    PR_NUMBER: ${{ inputs.pr_or_issue_number }}
-    MODEL: ${{ inputs.model }}
-    REVIEW_COMMENT_TYPE: ${{ inputs.review_comment_type }}
-    MAX_FILES: ${{ inputs.max_files }}
-    EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r ${{ github.action_path }}/requirements.txt
+
+    - name: Run review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        REPO_NAME: ${{ inputs.repository }}
+        PR_NUMBER: ${{ inputs.pr_or_issue_number }}
+        MODEL: ${{ inputs.model }}
+        REVIEW_COMMENT_TYPE: ${{ inputs.review_comment_type }}
+        MAX_FILES: ${{ inputs.max_files }}
+        EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
+      run: python ${{ github.action_path }}/review.py
