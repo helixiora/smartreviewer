@@ -26,20 +26,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_env_or_arg(env_var, arg_index, default=None):
-    """Get value from environment variable or command line argument."""
-    return os.getenv(env_var) or (sys.argv[arg_index] if len(sys.argv) > arg_index else default)
+def get_required_env(env_var):
+    """Get required environment variable."""
+    value = os.getenv(env_var)
+    if not value:
+        logger.error("Missing required environment variable: %s", env_var)
+        sys.exit(1)
+    return value
 
 
 def validate_credentials(github_token, openai_api_key):
     """Validate GitHub and OpenAI credentials."""
-    logger.debug("Starting GitHub credentials validation with token: %s", github_token)
     try:
         # Test GitHub token
         g = Github(auth=Auth.Token(github_token))
-        logger.debug("GitHub client initialized")
-        user_login = g.get_user().login  # Assign to _ to avoid W0106
-        logger.debug("Retrieved user login: %s", user_login)
+        _ = g.get_user().login
         logger.info("GitHub credentials validated successfully")
     except BadCredentialsException:
         logger.error("Invalid GitHub token")
@@ -48,37 +49,24 @@ def validate_credentials(github_token, openai_api_key):
         logger.error("Unexpected error during GitHub validation: %s", str(e))
         return False
 
-    logger.debug("Starting OpenAI credentials validation with API key: %s", openai_api_key)
     try:
         # Test OpenAI API key
         client = OpenAI(api_key=openai_api_key)
-        logger.debug("OpenAI client initialized")
-        models = client.models.list()
-        logger.debug("Retrieved models: %s", models)
+        client.models.list()
         logger.info("OpenAI credentials validated successfully")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Invalid OpenAI API key: %s", str(e))
         return False
 
-    logger.debug("Credentials validation completed successfully")
     return True
 
 
 def main():
-    # Get configuration
-    openai_api_key = get_env_or_arg("OPENAI_API_KEY", 1)
-    github_token = get_env_or_arg("GITHUB_TOKEN", 2)
-    repo_name = get_env_or_arg("REPO_NAME", 3)
-    pr_number = get_env_or_arg("PR_NUMBER", 4)
-    dry_run = get_env_or_arg("DRY_RUN", 5, "false").lower() == "true"
-
-    if not all([openai_api_key, github_token, repo_name, pr_number]):
-        error_msg = (
-            "Missing required environment variables or command line arguments. "
-            "Please set them in .env file or provide as command line arguments."
-        )
-        logger.error(error_msg)
-        sys.exit(1)
+    # Get required configuration
+    openai_api_key = get_required_env("OPENAI_API_KEY")
+    github_token = get_required_env("GITHUB_TOKEN")
+    repo_name = get_required_env("REPO_NAME")
+    pr_number = get_required_env("PR_NUMBER")
 
     try:
         pr_number = int(pr_number)
@@ -86,25 +74,9 @@ def main():
         logger.error("PR_NUMBER must be a valid integer")
         sys.exit(1)
 
-    # Log configuration in debug mode
-    logger.debug("Configuration loaded:")
-    logger.debug("- Repository: %s", repo_name)
-    logger.debug("- PR Number: %s", pr_number)
-    logger.debug("- Dry Run: %s", dry_run)
-
-    # Validate credentials if not in dry-run mode
-    if not dry_run and not validate_credentials(github_token, openai_api_key):
+    # Validate credentials
+    if not validate_credentials(github_token, openai_api_key):
         sys.exit(1)
-
-    # Check for dry-run mode
-    if dry_run:
-        logger.info("DRY RUN: Skipping GitHub API calls")
-        logger.info("DRY RUN: Would review PR and generate the following comment:")
-        print(
-            "### OpenAI Code Review:\n\nThis is a dry run. "
-            "In actual execution, this would contain the AI-generated review."
-        )
-        sys.exit(0)
 
     # Initialize GitHub client
     logger.info("Initializing GitHub client")
@@ -220,91 +192,87 @@ well-written.\n\n"
         sys.exit(1)
 
     # Parse review comments and post them as review comments
-    if dry_run:
-        logger.info("DRY RUN: Would post the following comments:")
-        print(review_comments)
-    else:
-        try:
-            logger.info("Posting review comments")
+    try:
+        logger.info("Posting review comments")
 
-            # Create a new review
+        # Create a new review
+        pr.create_review(
+            commit=pr.get_commits().reversed[0].sha,
+            body="AI Code Review Comments",
+            event="COMMENT",
+        )
+
+        # Parse and post individual comments
+        current_file = None
+        current_line = None
+        current_comment = []
+
+        for line in review_comments.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("FILE:"):
+                # If we have a previous comment, submit it
+                if current_file and current_line and current_comment:
+                    comment_text = "\n".join(current_comment)
+                    try:
+                        logger.debug("Posting comment on %s:%s", current_file, current_line)
+                        pr.create_review_comment(
+                            body=comment_text,
+                            commit=pr.get_commits().reversed[0].sha,
+                            path=current_file,
+                            line=current_line,
+                        )
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logger.warning(
+                            "Failed to post comment on %s:%s: %s",
+                            current_file,
+                            current_line,
+                            str(e),
+                        )
+
+                current_file = line.replace("FILE:", "").strip()
+                current_comment = []
+            elif line.startswith("LINE:"):
+                current_line = int(line.replace("LINE:", "").strip().split("-")[0])
+            elif line.startswith("COMMENT:"):
+                current_comment.append(line.replace("COMMENT:", "").strip())
+
+        # Submit the last comment if there is one
+        if current_file and current_line and current_comment:
+            comment_text = "\n".join(current_comment)
+            try:
+                logger.debug("Posting comment on %s:%s", current_file, current_line)
+                pr.create_review_comment(
+                    body=comment_text,
+                    commit=pr.get_commits().reversed[0].sha,
+                    path=current_file,
+                    line=current_line,
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Failed to post comment on %s:%s: %s",
+                    current_file,
+                    current_line,
+                    str(e),
+                )
+
+        # Submit the review
+        try:
             pr.create_review(
                 commit=pr.get_commits().reversed[0].sha,
-                body="AI Code Review Comments",
+                body="AI Code Review Complete",
                 event="COMMENT",
             )
-
-            # Parse and post individual comments
-            current_file = None
-            current_line = None
-            current_comment = []
-
-            for line in review_comments.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-
-                if line.startswith("FILE:"):
-                    # If we have a previous comment, submit it
-                    if current_file and current_line and current_comment:
-                        comment_text = "\n".join(current_comment)
-                        try:
-                            logger.debug("Posting comment on %s:%s", current_file, current_line)
-                            pr.create_review_comment(
-                                body=comment_text,
-                                commit=pr.get_commits().reversed[0].sha,
-                                path=current_file,
-                                line=current_line,
-                            )
-                        except Exception as e:  # pylint: disable=broad-exception-caught
-                            logger.warning(
-                                "Failed to post comment on %s:%s: %s",
-                                current_file,
-                                current_line,
-                                str(e),
-                            )
-
-                    current_file = line.replace("FILE:", "").strip()
-                    current_comment = []
-                elif line.startswith("LINE:"):
-                    current_line = int(line.replace("LINE:", "").strip().split("-")[0])
-                elif line.startswith("COMMENT:"):
-                    current_comment.append(line.replace("COMMENT:", "").strip())
-
-            # Submit the last comment if there is one
-            if current_file and current_line and current_comment:
-                comment_text = "\n".join(current_comment)
-                try:
-                    logger.debug("Posting comment on %s:%s", current_file, current_line)
-                    pr.create_review_comment(
-                        body=comment_text,
-                        commit=pr.get_commits().reversed[0].sha,
-                        path=current_file,
-                        line=current_line,
-                    )
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    logger.warning(
-                        "Failed to post comment on %s:%s: %s",
-                        current_file,
-                        current_line,
-                        str(e),
-                    )
-
-            # Submit the review
-            try:
-                pr.create_review(
-                    commit=pr.get_commits().reversed[0].sha,
-                    body="AI Code Review Complete",
-                    event="COMMENT",
-                )
-                logger.info("Review submitted successfully")
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Error submitting review: %s", str(e))
-                sys.exit(1)
-
+            logger.info("Review submitted successfully")
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Error posting review comments: %s", str(e))
+            logger.error("Error submitting review: %s", str(e))
             sys.exit(1)
+
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Error posting review comments: %s", str(e))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
