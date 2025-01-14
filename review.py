@@ -5,12 +5,14 @@ import json
 import logging
 import os
 import sys
-from typing import TYPE_CHECKING, List
+from enum import Enum
+from typing import TYPE_CHECKING, List, Optional
 
 from dotenv import load_dotenv
 from github import Auth, Github
 from github.GithubException import BadCredentialsException, UnknownObjectException
 from openai import OpenAI
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from github.PullRequest import PullRequest
@@ -28,7 +30,169 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_required_env(env_var):
+class ReviewVerdict(str, Enum):
+    """Possible review verdicts."""
+
+    APPROVED = "approved"
+    COMMENTED = "commented"
+    CHANGES_REQUESTED = "changes_requested"
+
+    @classmethod
+    def values(cls) -> List[str]:
+        """Get all possible values."""
+        return [v.value for v in cls]
+
+
+class ReviewComment(BaseModel):
+    """Individual review comment."""
+
+    file: str = Field(..., description="The file path being commented on")
+    line: int = Field(..., description="The line number being commented on")
+    comment: str = Field(
+        ...,
+        description="The review comment with specific, actionable feedback",
+    )
+
+
+class IndividualReview(BaseModel):
+    """Individual review response format."""
+
+    comments: List[ReviewComment] = Field(
+        default_factory=list, description="List of review comments"
+    )
+    verdict: ReviewVerdict = Field(
+        default=ReviewVerdict.COMMENTED, description="The overall verdict of the review"
+    )
+    summary: str = Field(default="", description="A brief overview of the changes and their impact")
+
+    def to_schema(self) -> dict:
+        """Convert to OpenAI schema format."""
+        return {
+            "type": "object",
+            "properties": {
+                "comments": {
+                    "type": "array",
+                    "description": "List of review comments",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "description": "The file path being commented on",
+                            },
+                            "line": {
+                                "type": "integer",
+                                "description": "The line number being commented on",
+                            },
+                            "comment": {
+                                "type": "string",
+                                "description": "The review comment with specific, actionable \
+feedback",
+                            },
+                        },
+                        "required": ["file", "line", "comment"],
+                    },
+                },
+                "verdict": {
+                    "type": "string",
+                    "enum": ReviewVerdict.values(),
+                    "description": "The overall verdict of the review",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "A brief overview of the changes and their impact",
+                },
+            },
+            "required": ["comments", "verdict", "summary"],
+        }
+
+
+class SummarizedReview(BaseModel):
+    """Summarized review response format."""
+
+    summary: str = Field(
+        default="", description="Overall assessment of the changes and their impact"
+    )
+    improvements: List[str] = Field(
+        default_factory=list,
+        description="List of specific, actionable improvements suggested",
+    )
+    concerns: List[str] = Field(
+        default_factory=list,
+        description="List of concerns or potential issues identified",
+    )
+    verdict: ReviewVerdict = Field(
+        default=ReviewVerdict.COMMENTED,
+        description="The overall verdict of the review",
+    )
+
+    def to_schema(self) -> dict:
+        """Convert to OpenAI schema format."""
+        return {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Overall assessment of the changes and their impact",
+                },
+                "improvements": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of specific, actionable improvements suggested",
+                },
+                "concerns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of concerns or potential issues identified",
+                },
+                "verdict": {
+                    "type": "string",
+                    "enum": ReviewVerdict.values(),
+                    "description": "The overall verdict of the review",
+                },
+            },
+            "required": ["summary", "improvements", "concerns", "verdict"],
+        }
+
+
+def format_review_body(
+    review: IndividualReview | SummarizedReview, failed_comments: Optional[List[str]] = None
+) -> str:
+    """Format the review body based on the review type."""
+    if isinstance(review, SummarizedReview):
+        return (
+            f"# Review Summary\n\n{review.summary}\n\n"
+            "## Suggested Improvements\n\n"
+            + "\n".join(f"- {improvement}" for improvement in review.improvements)
+            + "\n\n## Concerns\n\n"
+            + "\n".join(f"- {concern}" for concern in review.concerns)
+        )
+
+    body = f"# Review Summary\n\n{review.summary}"
+    if review.comments:
+        body += "\n\n## Review Comments\n\n" + "\n".join(
+            f"- {comment.file}:{comment.line} - {comment.comment}" for comment in review.comments
+        )
+    elif review.verdict == ReviewVerdict.APPROVED:
+        body += "\n\n✅ Code looks good! No issues found."
+    if failed_comments:
+        body += "\n\n## Failed Comments\n\n" + "\n".join(failed_comments)
+    return body
+
+
+class ReviewType(str, Enum):
+    """Review comment types."""
+
+    INDIVIDUAL = "individual"
+    SUMMARIZED = "summarized"
+
+    @classmethod
+    def values(cls) -> List[str]:
+        """Get all possible values."""
+        return [v.value for v in cls]
+
+
+def get_required_env(env_var: str) -> str:
     """Get required environment variable."""
     value = os.getenv(env_var)
     if not value:
@@ -37,12 +201,12 @@ def get_required_env(env_var):
     return value
 
 
-def get_optional_env(env_var, default=None):
+def get_optional_env(env_var: str, default: Optional[str] = None) -> str:
     """Get optional environment variable with default value."""
-    return os.getenv(env_var, default)
+    return os.getenv(env_var) or (default or "")
 
 
-def validate_credentials(github_token, openai_api_key):
+def validate_credentials(github_token: str, openai_api_key: str) -> bool:
     """Validate GitHub and OpenAI credentials."""
     try:
         # Test GitHub token by accessing the repository
@@ -81,7 +245,7 @@ def should_exclude_file(filename: str, exclude_patterns: List[str]) -> bool:
     )
 
 
-def set_output(name: str, value: str):
+def set_output(name: str, value: str) -> None:
     """Set an output variable for GitHub Actions."""
     if os.getenv("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
@@ -96,16 +260,27 @@ def main():
     pr_number = get_required_env("PR_NUMBER")
 
     # Get optional configuration
-    model = get_optional_env("MODEL", "gpt-4")
-    review_comment_type = get_optional_env("REVIEW_COMMENT_TYPE", "individual")
+    model = get_optional_env("MODEL", "gpt-4o")
+    review_comment_type = get_optional_env("REVIEW_COMMENT_TYPE", ReviewType.INDIVIDUAL.value)
     max_files = int(get_optional_env("MAX_FILES", "50"))
     exclude_patterns = get_optional_env("EXCLUDE_PATTERNS", "").split("\n")
+
+    # Validate review type
+    try:
+        review_type = ReviewType(review_comment_type)
+    except ValueError:
+        logger.error(
+            "Invalid review type: %s. Must be one of: %s",
+            review_comment_type,
+            ", ".join(ReviewType.values()),
+        )
+        sys.exit(1)
 
     logger.info("Configuration loaded:")
     logger.info("- Repository: %s", repo_name)
     logger.info("- PR Number: %s", pr_number)
     logger.info("- Model: %s", model)
-    logger.info("- Review Type: %s", review_comment_type)
+    logger.info("- Review Type: %s", review_type.value)
     logger.info("- Max Files: %d", max_files)
     logger.info("- Exclude Patterns: %s", exclude_patterns)
 
@@ -183,185 +358,135 @@ def main():
     pr_description = pr.body or ""
     logger.info("PR description length: %d characters", len(pr_description))
 
-    # Create the prompt for OpenAI based on review type
-    if review_comment_type == "summarized":
-        prompt = (
-            "Review the following pull request and provide a comprehensive summary of all changes "
-            "and potential improvements. Focus on high-level patterns and architectural concerns:\n"
-            f"PR Title: {pr.title}\n"
-            f"Description: {pr_description}\n"
-            f"Files Changed: {files_reviewed}\n"
-            f"Commit Messages:\n{chr(10).join(f'- {msg}' for msg in commit_messages)}\n\n"
-            "Code Changes:\n"
-            f"{chr(10).join(code_snippets)}\n\n"
-            "Provide your review in the following format:\n"
-            "SUMMARY: Overall assessment of the changes\n"
-            "IMPROVEMENTS: List of suggested improvements\n"
-            "CONCERNS: Any concerns or potential issues\n"
-            "VERDICT: Either 'approved', 'commented', or 'changes_requested'"
-        )
-    else:  # individual comments
-        prompt = (
-            "Review the following pull request and provide specific, actionable feedback "
-            "for each issue found:\n\n"
-            f"PR Title: {pr.title}\n"
-            f"Description: {pr_description}\n"
-            f"Commit Messages:\n{chr(10).join(f'- {msg}' for msg in commit_messages)}\n\n"
-            "Code Changes:\n"
-            f"{chr(10).join(code_snippets)}\n\n"
-            "For each issue, provide:\n"
-            "FILE: <file_path>\n"
-            "LINE: <line_number_or_range>\n"
-            "COMMENT: <specific_actionable_feedback>\n\n"
-            "End your review with:\n"
-            "VERDICT: Either 'approved', 'commented', or 'changes_requested'\n"
-            "SUMMARY: Brief overview of your findings"
-        )
-
     # Request code review from OpenAI
     logger.info("Requesting code review from OpenAI using model: %s", model)
     try:
         client = OpenAI(api_key=openai_api_key)
+
+        if review_type == ReviewType.INDIVIDUAL:
+            review_class = IndividualReview
+        else:
+            review_class = SummarizedReview
+
+        # Create an empty instance just for schema generation
+        json_schema = review_class().to_schema()
+
+        prompt = (
+            "Review the following pull request and provide structured feedback. "
+            "Focus on providing specific, actionable feedback that helps improve code quality. "
+            "Approve if the code is well-written, but always suggest improvements where possible. "
+            "Be direct and clear in your feedback.\n\n"
+            f"PR Title: {pr.title}\n"
+            f"Description: {pr_description}\n"
+            f"Files Changed: {files_reviewed}\n"
+            f"Commit Messages:\n{chr(10).join([f'- {msg}' for msg in commit_messages])}\n\n"
+            "Code Changes:\n"
+            f"{chr(10).join(code_snippets)}"
+        )
+
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are a code review assistant helping a developer review a pull request."
-                        "Focus on providing high-quality, actionable feedback. "
-                        "It's fine to approve if the code is well-written. "
-                        "Each comment must include specific, concrete suggestions for improvement. "
-                        "Don't use weak language - be direct and clear."
+                        "You are a code review assistant. Provide a thorough code review that is "
+                        "specific, actionable, and helps improve code quality. Focus on concrete "
+                        "suggestions and clear feedback."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
+            response_format={"type": "json_object", "schema": json_schema},
         )
-        review_comments = response.choices[0].message.content
-        logger.info("Received review response of length: %d", len(review_comments))
-        logger.debug("Review response: %s", review_comments)
+
+        # Extract the review from the structured output
+        review_data = json.loads(response.choices[0].message.content)
+        logger.info("Received structured review response")
+        logger.debug("Review data: %s", review_data)
+
+        # Parse and validate the review data
+        try:
+            if review_type == ReviewType.INDIVIDUAL:
+                review = IndividualReview(**review_data)
+            else:
+                review = SummarizedReview(**review_data)
+            logger.info("Successfully validated review data")
+        except Exception as e:
+            logger.error("Failed to validate review data: %s", str(e))
+            sys.exit(1)
+
+        # Set outputs
+        set_output("review_result", review.verdict.value)
+        set_output("review_summary", json.dumps(review.summary))
+
+        # Post review based on type
+        try:
+            latest_commit = pr.get_commits().reversed[0]
+            logger.info("Latest commit: %s", latest_commit.sha)
+            review_event = (
+                str(review.verdict).upper()
+                if review.verdict != ReviewVerdict.COMMENTED
+                else "COMMENT"
+            )
+            logger.info("Review event: %s", review_event)
+
+            if review_type == ReviewType.SUMMARIZED:
+                logger.info("Posting summarized review")
+                pr.create_review(
+                    body=format_review_body(review),
+                    commit=latest_commit.sha,
+                    event=review_event,
+                )
+            else:
+                logger.info("Posting individual review comments")
+                # Post individual comments
+                failed_comments = []
+
+                for comment in review.comments:
+                    try:
+                        logger.info("Posting comment for %s:%d", comment.file, comment.line)
+                        pr.create_review_comment(
+                            body=comment.comment,
+                            commit=latest_commit.sha,
+                            path=comment.file,
+                            line=comment.line,
+                        )
+                        logger.info("Successfully posted comment")
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to post comment on %s:%s: %s",
+                            comment.file,
+                            comment.line,
+                            str(e),
+                        )
+                        failed_comments.append(f"{comment.file}:{comment.line} - {comment.comment}")
+
+                # Create the final review with verdict
+                try:
+                    logger.info("Creating final review with verdict: %s", review.verdict)
+                    body = format_review_body(review, failed_comments)
+                    logger.info("Review body length: %d", len(body))
+                    pr.create_review(
+                        body=body,
+                        commit=latest_commit.sha,
+                        event=review_event,
+                    )
+                    logger.info("Successfully posted final review")
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logger.error("Error posting review. Details: %s", str(e))
+                    logger.error("Review body: %s", body)
+                    logger.error("Verdict: %s", review.verdict)
+                    logger.error("Review event: %s", review_event)
+                    logger.error("Commit SHA: %s", latest_commit.sha)
+                    sys.exit(1)
+
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Error in review process: %s", str(e))
+            sys.exit(1)
+
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Error getting review from OpenAI: %s", str(e))
-        sys.exit(1)
-
-    # Extract verdict and summary
-    verdict = "commented"  # default
-    summary = ""
-    for line in review_comments.split("\n"):
-        if line.startswith("VERDICT:"):
-            verdict = line.replace("VERDICT:", "").strip().lower()
-            logger.info("Review verdict: %s", verdict)
-        elif line.startswith("SUMMARY:"):
-            summary = line.replace("SUMMARY:", "").strip()
-            logger.info("Review summary length: %d", len(summary))
-
-    # Set outputs
-    set_output("review_result", verdict)
-    set_output("review_summary", json.dumps(summary))
-
-    # Post review based on type
-    try:
-        if review_comment_type == "summarized":
-            logger.info("Posting summarized review")
-            latest_commit = pr.get_commits().reversed[0]
-            logger.info("Latest commit: %s", latest_commit.sha)
-            # Post a single review with the summary
-            pr.create_review(
-                body=review_comments,
-                commit=latest_commit.sha,
-                event=verdict.upper()
-                if verdict in ["approved", "changes_requested"]
-                else "COMMENT",
-            )
-        else:
-            logger.info("Posting individual review comments")
-            # Parse and post individual comments
-            current_file = None
-            current_line = None
-            current_comment = []
-            review_body = []
-            latest_commit = pr.get_commits().reversed[0]
-            logger.info("Latest commit: %s", latest_commit.sha)
-
-            for line in review_comments.split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-
-                if line.startswith("FILE:"):
-                    # If we have a previous comment, submit it
-                    if current_file and current_line and current_comment:
-                        comment_text = "\n".join(current_comment)
-                        try:
-                            logger.info("Posting comment for %s:%d", current_file, current_line)
-                            pr.create_review_comment(
-                                body=comment_text,
-                                commit=latest_commit.sha,
-                                path=current_file,
-                                line=current_line,
-                            )
-                            logger.info("Successfully posted comment")
-                        except Exception as e:
-                            logger.warning(
-                                "Failed to post comment on %s:%s: %s",
-                                current_file,
-                                current_line,
-                                str(e),
-                            )
-                            review_body.append(f"{current_file}:{current_line} - {comment_text}")
-
-                    current_file = line.replace("FILE:", "").strip()
-                    current_comment = []
-                elif line.startswith("LINE:"):
-                    current_line = int(line.replace("LINE:", "").strip().split("-")[0])
-                elif line.startswith("COMMENT:"):
-                    current_comment.append(line.replace("COMMENT:", "").strip())
-                elif line.startswith(("VERDICT:", "SUMMARY:")):
-                    review_body.append(line)
-
-            # Submit the last comment if there is one
-            if current_file and current_line and current_comment:
-                comment_text = "\n".join(current_comment)
-                try:
-                    logger.info("Posting final comment for %s:%d", current_file, current_line)
-                    pr.create_review_comment(
-                        body=comment_text,
-                        commit=latest_commit.sha,
-                        path=current_file,
-                        line=current_line,
-                    )
-                    logger.info("Successfully posted final comment")
-                except Exception as e:
-                    logger.warning(
-                        "Failed to post comment on %s:%s: %s",
-                        current_file,
-                        current_line,
-                        str(e),
-                    )
-                    review_body.append(f"{current_file}:{current_line} - {comment_text}")
-
-            # Create the final review with verdict
-            try:
-                logger.info("Creating final review with verdict: %s", verdict)
-                logger.info("Review body length: %d", len("\n\n".join(review_body)))
-                pr.create_review(
-                    body="\n\n".join(review_body),
-                    commit=latest_commit.sha,
-                    event=verdict.upper()
-                    if verdict in ["approved", "changes_requested"]
-                    else "COMMENT",
-                )
-                logger.info("Successfully posted final review")
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Error posting review. Details: %s", str(e))
-                logger.error("Review body: %s", "\n\n".join(review_body))
-                logger.error("Verdict: %s", verdict)
-                logger.error("Commit SHA: %s", latest_commit.sha)
-                sys.exit(1)
-
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Error in review process: %s", str(e))
         sys.exit(1)
 
 

@@ -22,7 +22,7 @@ inputs:
     required: false
 
   review_comment_type:
-    description: 'Type of review comments to make: individual (per change) or summarized'
+    description: 'Type of review comments to make: individual or summarized'
     default: 'individual'
     required: false
 
