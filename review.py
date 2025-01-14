@@ -389,15 +389,17 @@ def main():
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "You are a code review assistant. Provide a thorough code review that is "
-                        "specific, actionable, and helps improve code quality. Focus on concrete "
-                        "suggestions and clear feedback."
-                    ),
+                    "content": "You are a code review assistant. Provide a thorough code review "
+                    "that is specific, actionable, and helps improve code quality. Focus on "
+                    "concrete suggestions and clear feedback. Your response must follow this "
+                    f"JSON schema:\n{json.dumps(json_schema, indent=2)}",
                 },
                 {"role": "user", "content": prompt},
             ],
-            response_format={"type": "json_object", "schema": json_schema},
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"strict": True, "schema": json_schema},
+            },
         )
 
         # Extract the review from the structured output
