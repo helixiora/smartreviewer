@@ -45,9 +45,10 @@ def get_optional_env(env_var, default=None):
 def validate_credentials(github_token, openai_api_key):
     """Validate GitHub and OpenAI credentials."""
     try:
-        # Test GitHub token
+        # Test GitHub token by accessing the repository
         g = Github(auth=Auth.Token(github_token))
-        _ = g.get_user().login
+        repo_name = get_required_env("REPO_NAME")
+        _ = g.get_repo(repo_name).full_name
         logger.info("GitHub credentials validated successfully")
     except BadCredentialsException:
         logger.error("Invalid GitHub token")
