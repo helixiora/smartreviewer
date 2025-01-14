@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 
+import fnmatch
+import json
 import logging
 import os
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 from dotenv import load_dotenv
 from github import Auth, Github
@@ -35,6 +37,11 @@ def get_required_env(env_var):
     return value
 
 
+def get_optional_env(env_var, default=None):
+    """Get optional environment variable with default value."""
+    return os.getenv(env_var, default)
+
+
 def validate_credentials(github_token, openai_api_key):
     """Validate GitHub and OpenAI credentials."""
     try:
@@ -61,12 +68,37 @@ def validate_credentials(github_token, openai_api_key):
     return True
 
 
+def should_exclude_file(filename: str, exclude_patterns: List[str]) -> bool:
+    """Check if a file should be excluded based on patterns."""
+    if not exclude_patterns:
+        return False
+
+    return any(
+        fnmatch.fnmatch(filename, pattern.strip())
+        for pattern in exclude_patterns
+        if pattern.strip()
+    )
+
+
+def set_output(name: str, value: str):
+    """Set an output variable for GitHub Actions."""
+    if os.getenv("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"{name}={value}\n")
+
+
 def main():
     # Get required configuration
     openai_api_key = get_required_env("OPENAI_API_KEY")
     github_token = get_required_env("GITHUB_TOKEN")
     repo_name = get_required_env("REPO_NAME")
     pr_number = get_required_env("PR_NUMBER")
+
+    # Get optional configuration
+    model = get_optional_env("MODEL", "gpt-4")
+    review_comment_type = get_optional_env("REVIEW_COMMENT_TYPE", "individual")
+    max_files = int(get_optional_env("MAX_FILES", "50"))
+    exclude_patterns = get_optional_env("EXCLUDE_PATTERNS", "").split("\n")
 
     try:
         pr_number = int(pr_number)
@@ -96,14 +128,29 @@ def main():
 
     # Collect code diffs
     code_snippets = []
+    files_reviewed = 0
     try:
         for file in pr.get_files():
+            if files_reviewed >= max_files:
+                logger.warning(
+                    "Reached maximum file limit (%d). Skipping remaining files.", max_files
+                )
+                break
+
+            if should_exclude_file(file.filename, exclude_patterns):
+                logger.info("Skipping excluded file: %s", file.filename)
+                continue
+
             logger.info("Collecting code snippets from: %s", file.filename)
             if file.patch:
-                code_snippets.append(file.patch)
+                code_snippets.append(f"File: {file.filename}\n{file.patch}")
+                files_reviewed += 1
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Error collecting code diffs: %s", str(e))
         sys.exit(1)
+
+    # Set files_reviewed output
+    set_output("files_reviewed", str(files_reviewed))
 
     # Collect commit messages
     try:
@@ -115,72 +162,56 @@ def main():
     # Collect PR description
     pr_description = pr.body or ""
 
-    # Collect comments and reviews
-    try:
-        comments = pr.get_issue_comments()
-        reviews = pr.get_reviews()
-
-        all_comments = [comment.body for comment in comments] + [
-            review.body for review in reviews if review.body
-        ]
-    except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Error collecting comments and reviews: %s", str(e))
-        sys.exit(1)
-
-    # Create the prompt for OpenAI
-    prompt = (
-        "Review the following pull request and provide ONLY actionable feedback "
-        "for clear issues or improvements:\n"
-        f"- Description: {pr_description}\n"
-        f"- Commit Messages: {' '.join(commit_messages)}\n"
-        f"- Code Snippets: {' '.join(code_snippets)}\n"
-        f"- Comments and Reviews: {' '.join(all_comments)}\n\n"
-        "Focus on quality over quantity. Only point out issues that:\n"
-        "1. Have a clear, actionable solution\n"
-        "2. Would meaningfully improve the code\n"
-        "3. Address actual problems (security, bugs, performance, maintainability)\n\n"
-        "It's perfectly acceptable to find no issues or just a few issues if the code is \
-well-written.\n\n"
-        "For each actionable issue you find, specify:\n"
-        "1. The exact file path\n"
-        "2. The specific line number or range from the diff\n"
-        "3. A clear, concrete suggestion for improvement\n\n"
-        "Format each comment as:\n"
-        "FILE: <file_path>\n"
-        "LINE: <line_number_or_range>\n"
-        "COMMENT: <specific_actionable_feedback>\n\n"
-        "Example of a good comment:\n"
-        "FILE: src/main.py\n"
-        "LINE: 45\n"
-        "COMMENT: Add error handling for the database connection. Wrap the connection attempt in a "
-        "try-catch block and implement a retry mechanism with exponential backoff.\n\n"
-        "Example of a comment that is NOT actionable (avoid these):\n"
-        "FILE: src/main.py\n"
-        "LINE: 45\n"
-        "COMMENT: This code could be better. Consider improving the error handling."
-    )
+    # Create the prompt for OpenAI based on review type
+    if review_comment_type == "summarized":
+        prompt = (
+            "Review the following pull request and provide a comprehensive summary of all changes "
+            "and potential improvements. Focus on high-level patterns and architectural concerns:\n"
+            f"PR Title: {pr.title}\n"
+            f"Description: {pr_description}\n"
+            f"Files Changed: {files_reviewed}\n"
+            f"Commit Messages:\n{chr(10).join(f'- {msg}' for msg in commit_messages)}\n\n"
+            "Code Changes:\n"
+            f"{chr(10).join(code_snippets)}\n\n"
+            "Provide your review in the following format:\n"
+            "SUMMARY: Overall assessment of the changes\n"
+            "IMPROVEMENTS: List of suggested improvements\n"
+            "CONCERNS: Any concerns or potential issues\n"
+            "VERDICT: Either 'approved', 'commented', or 'changes_requested'"
+        )
+    else:  # individual comments
+        prompt = (
+            "Review the following pull request and provide specific, actionable feedback "
+            "for each issue found:\n\n"
+            f"PR Title: {pr.title}\n"
+            f"Description: {pr_description}\n"
+            f"Commit Messages:\n{chr(10).join(f'- {msg}' for msg in commit_messages)}\n\n"
+            "Code Changes:\n"
+            f"{chr(10).join(code_snippets)}\n\n"
+            "For each issue, provide:\n"
+            "FILE: <file_path>\n"
+            "LINE: <line_number_or_range>\n"
+            "COMMENT: <specific_actionable_feedback>\n\n"
+            "End your review with:\n"
+            "VERDICT: Either 'approved', 'commented', or 'changes_requested'\n"
+            "SUMMARY: Brief overview of your findings"
+        )
 
     # Request code review from OpenAI
-    logger.info("Requesting code review from OpenAI")
+    logger.info("Requesting code review from OpenAI using model: %s", model)
     try:
         client = OpenAI(api_key=openai_api_key)
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=model,
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a code review assistant helping a developer review a pull request."
-                        "Focus on providing only high-quality, actionable feedback. "
-                        "It's perfectly fine to find no issues if the code is well-written. "
+                        "Focus on providing high-quality, actionable feedback. "
+                        "It's fine to approve if the code is well-written. "
                         "Each comment must include specific, concrete suggestions for improvement. "
-                        'Don\'t use phrases like "consider", "maybe", or "might want to". '
-                        'Instead, give direct, actionable advice like "Add", "Remove", \
-"Replace with", etc. '
-                        "Don't comment on style unless it violates a clear best practice. "
-                        "Don't suggest refactoring unless there's a clear maintainability issue. "
-                        "Don't provide feedback on PR descriptions or commit messages. "
-                        "Format each comment with FILE:, LINE:, and COMMENT: prefixes."
+                        "Don't use weak language - be direct and clear."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -191,87 +222,101 @@ well-written.\n\n"
         logger.error("Error getting review from OpenAI: %s", str(e))
         sys.exit(1)
 
-    # Parse review comments and post them as review comments
+    # Extract verdict and summary
+    verdict = "commented"  # default
+    summary = ""
+    for line in review_comments.split("\n"):
+        if line.startswith("VERDICT:"):
+            verdict = line.replace("VERDICT:", "").strip().lower()
+        elif line.startswith("SUMMARY:"):
+            summary = line.replace("SUMMARY:", "").strip()
+
+    # Set outputs
+    set_output("review_result", verdict)
+    set_output("review_summary", json.dumps(summary))
+
+    # Post review based on type
     try:
-        logger.info("Posting review comments")
-
-        # Create a new review
-        pr.create_review(
-            commit=pr.get_commits().reversed[0].sha,
-            body="AI Code Review Comments",
-            event="COMMENT",
-        )
-
-        # Parse and post individual comments
-        current_file = None
-        current_line = None
-        current_comment = []
-
-        for line in review_comments.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-
-            if line.startswith("FILE:"):
-                # If we have a previous comment, submit it
-                if current_file and current_line and current_comment:
-                    comment_text = "\n".join(current_comment)
-                    try:
-                        logger.debug("Posting comment on %s:%s", current_file, current_line)
-                        pr.create_review_comment(
-                            body=comment_text,
-                            commit=pr.get_commits().reversed[0].sha,
-                            path=current_file,
-                            line=current_line,
-                        )
-                    except Exception as e:  # pylint: disable=broad-exception-caught
-                        logger.warning(
-                            "Failed to post comment on %s:%s: %s",
-                            current_file,
-                            current_line,
-                            str(e),
-                        )
-
-                current_file = line.replace("FILE:", "").strip()
-                current_comment = []
-            elif line.startswith("LINE:"):
-                current_line = int(line.replace("LINE:", "").strip().split("-")[0])
-            elif line.startswith("COMMENT:"):
-                current_comment.append(line.replace("COMMENT:", "").strip())
-
-        # Submit the last comment if there is one
-        if current_file and current_line and current_comment:
-            comment_text = "\n".join(current_comment)
-            try:
-                logger.debug("Posting comment on %s:%s", current_file, current_line)
-                pr.create_review_comment(
-                    body=comment_text,
-                    commit=pr.get_commits().reversed[0].sha,
-                    path=current_file,
-                    line=current_line,
-                )
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.warning(
-                    "Failed to post comment on %s:%s: %s",
-                    current_file,
-                    current_line,
-                    str(e),
-                )
-
-        # Submit the review
-        try:
+        if review_comment_type == "summarized":
+            # Post a single review with the summary
             pr.create_review(
+                body=review_comments,
                 commit=pr.get_commits().reversed[0].sha,
-                body="AI Code Review Complete",
-                event="COMMENT",
+                event=verdict.upper()
+                if verdict in ["approved", "changes_requested"]
+                else "COMMENT",
             )
-            logger.info("Review submitted successfully")
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Error submitting review: %s", str(e))
-            sys.exit(1)
+        else:
+            # Parse and post individual comments
+            current_file = None
+            current_line = None
+            current_comment = []
+            review_body = []
+
+            for line in review_comments.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+
+                if line.startswith("FILE:"):
+                    # If we have a previous comment, submit it
+                    if current_file and current_line and current_comment:
+                        comment_text = "\n".join(current_comment)
+                        try:
+                            pr.create_review_comment(
+                                body=comment_text,
+                                commit=pr.get_commits().reversed[0].sha,
+                                path=current_file,
+                                line=current_line,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to post comment on %s:%s: %s",
+                                current_file,
+                                current_line,
+                                str(e),
+                            )
+                            review_body.append(f"{current_file}:{current_line} - {comment_text}")
+
+                    current_file = line.replace("FILE:", "").strip()
+                    current_comment = []
+                elif line.startswith("LINE:"):
+                    current_line = int(line.replace("LINE:", "").strip().split("-")[0])
+                elif line.startswith("COMMENT:"):
+                    current_comment.append(line.replace("COMMENT:", "").strip())
+                elif line.startswith(("VERDICT:", "SUMMARY:")):
+                    review_body.append(line)
+
+            # Submit the last comment if there is one
+            if current_file and current_line and current_comment:
+                comment_text = "\n".join(current_comment)
+                try:
+                    pr.create_review_comment(
+                        body=comment_text,
+                        commit=pr.get_commits().reversed[0].sha,
+                        path=current_file,
+                        line=current_line,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to post comment on %s:%s: %s",
+                        current_file,
+                        current_line,
+                        str(e),
+                    )
+                    review_body.append(f"{current_file}:{current_line} - {comment_text}")
+
+            # Create the final review with verdict
+            pr.create_review(
+                body="\n\n".join(review_body),
+                commit=pr.get_commits().reversed[0].sha,
+                event=verdict.upper()
+                if verdict in ["approved", "changes_requested"]
+                else "COMMENT",
+            )
 
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.error("Error posting review comments: %s", str(e))
+        logger.error("Error posting review: %s", str(e))
         sys.exit(1)
 
 

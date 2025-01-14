@@ -1,17 +1,61 @@
 name: 'AI Pull Request Reviewer'
-description: 'Automatically review pull requests using AI to provide detailed feedback'
+description: 'Automatically review pull requests using AI to provide detailed feedback and suggestions for improvements'
 author: 'helixiora'
 
 inputs:
   openai_api_key:
-    description: 'OpenAI API key'
+    description: >
+      OpenAI API key used for generating review comments. We recommend using a service
+      account with the least permissions necessary and storing this as an encrypted secret.
     required: true
+
+  github_token:
+    description: >
+      GitHub token used to interact with the repository. Defaults to github.token.
+      Requires permissions to read PR contents and post comments.
+    default: ${{ github.token }}
+    required: false
+
+  model:
+    description: 'The OpenAI model to use for generating reviews'
+    default: 'gpt-4o'
+    required: false
+
+  review_comment_type:
+    description: 'Type of review comments to make: individual (per change) or summarized'
+    default: 'individual'
+    required: false
+
+  max_files:
+    description: 'Maximum number of files to review in a single PR'
+    default: '50'
+    required: false
+
+  exclude_patterns:
+    description: >
+      Files to exclude from review (glob patterns, newline separated).
+      Example: "*.md\n*.lock\ngenerated/*"
+    required: false
+
+outputs:
+  review_result:
+    description: 'The overall result of the review (approved, commented, or changes_requested)'
+
+  review_summary:
+    description: 'A summary of all the changes reviewed and suggestions made'
+
+  files_reviewed:
+    description: 'Number of files that were reviewed'
 
 runs:
   using: 'docker'
   image: 'Dockerfile'
   env:
-    GITHUB_TOKEN: ${{ github.token }}
+    GITHUB_TOKEN: ${{ inputs.github_token }}
     OPENAI_API_KEY: ${{ inputs.openai_api_key }}
     REPO_NAME: ${{ github.repository }}
     PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+    MODEL: ${{ inputs.model }}
+    REVIEW_COMMENT_TYPE: ${{ inputs.review_comment_type }}
+    MAX_FILES: ${{ inputs.max_files }}
+    EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
