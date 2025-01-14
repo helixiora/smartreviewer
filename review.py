@@ -6,7 +6,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
-from github import Github
+from github import Auth, Github
 from github.GithubException import BadCredentialsException, UnknownObjectException
 from openai import OpenAI
 
@@ -33,24 +33,34 @@ def get_env_or_arg(env_var, arg_index, default=None):
 
 def validate_credentials(github_token, openai_api_key):
     """Validate GitHub and OpenAI credentials."""
+    logger.debug("Starting GitHub credentials validation with token: %s", github_token)
     try:
         # Test GitHub token
-        g = Github(github_token)
-        _ = g.get_user().login  # Assign to _ to avoid W0106
+        g = Github(auth=Auth.Token(github_token))
+        logger.debug("GitHub client initialized")
+        user_login = g.get_user().login  # Assign to _ to avoid W0106
+        logger.debug("Retrieved user login: %s", user_login)
         logger.info("GitHub credentials validated successfully")
     except BadCredentialsException:
         logger.error("Invalid GitHub token")
         return False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error("Unexpected error during GitHub validation: %s", str(e))
+        return False
 
+    logger.debug("Starting OpenAI credentials validation with API key: %s", openai_api_key)
     try:
         # Test OpenAI API key
         client = OpenAI(api_key=openai_api_key)
-        client.models.list()
+        logger.debug("OpenAI client initialized")
+        models = client.models.list()
+        logger.debug("Retrieved models: %s", models)
         logger.info("OpenAI credentials validated successfully")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Invalid OpenAI API key: %s", str(e))
         return False
 
+    logger.debug("Credentials validation completed successfully")
     return True
 
 
