@@ -417,16 +417,18 @@ def main():
         # Create an empty instance just for schema generation
         json_schema = review_class().to_schema()
 
+        # Format the list of modified lines
+        modified_lines_list = []
+        for file, lines in modified_lines.items():
+            modified_lines_list.append(f"- {file}: {sorted(lines)}")
+        modified_lines_str = chr(10).join(modified_lines_list)
+
         prompt = (
             "Review the following pull request and provide structured feedback. "
             "Focus on providing specific, actionable feedback that helps improve code quality. "
             "CRITICAL: You MUST ONLY comment on the following modified line numbers "
             "in each file:\n"
-            f"{
-                chr(10).join(
-                    [f'- {file}: {sorted(lines)}' for file, lines in modified_lines.items()]
-                )
-            }\n"
+            f"{modified_lines_str}\n"
             "Any comments on other line numbers will be rejected. "
             "Your line numbers MUST exactly match these modified lines. "
             "Approve if the code is well-written, but always suggest improvements where possible. "
