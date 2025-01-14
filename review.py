@@ -8,6 +8,7 @@ import sys
 from enum import Enum
 from typing import TYPE_CHECKING, List, Optional
 
+import requests
 from dotenv import load_dotenv
 from github import Auth, Github
 from github.GithubException import BadCredentialsException, UnknownObjectException
@@ -86,11 +87,11 @@ class IndividualReview(BaseModel):
                             },
                             "comment": {
                                 "type": "string",
-                                "description": "The review comment with specific, actionable \
-feedback",
+                                "description": "The review comment with specific feedback",
                             },
                         },
                         "required": ["file", "line", "comment"],
+                        "additionalProperties": False,
                     },
                 },
                 "verdict": {
@@ -104,6 +105,7 @@ feedback",
                 },
             },
             "required": ["comments", "verdict", "summary"],
+            "additionalProperties": False,
         }
 
 
@@ -152,6 +154,7 @@ class SummarizedReview(BaseModel):
                 },
             },
             "required": ["summary", "improvements", "concerns", "verdict"],
+            "additionalProperties": False,
         }
 
 
@@ -195,6 +198,7 @@ class ReviewType(str, Enum):
 def get_required_env(env_var: str) -> str:
     """Get required environment variable."""
     value = os.getenv(env_var)
+    logger.debug("Environment variable %s = %s", env_var, value)
     if not value:
         logger.error("Missing required environment variable: %s", env_var)
         sys.exit(1)
@@ -303,6 +307,16 @@ def main():
         logger.info("Successfully accessed repository: %s", repo.full_name)
         pr: PullRequest = repo.get_pull(pr_number)
         logger.info("Successfully accessed PR #%d: %s", pr_number, pr.title)
+
+        # Check if the pull request is open
+        if pr.state != "open":
+            logger.error("Pull request #%d is not open. Current state: %s", pr_number, pr.state)
+            sys.exit(1)
+
+        # Verify the latest commit SHA
+        latest_commit = pr.get_commits().reversed[0]
+        logger.info("Latest commit SHA: %s", latest_commit.sha)
+
     except UnknownObjectException:
         logger.error("Could not find PR #%s in repository %s", pr_number, repo_name)
         sys.exit(1)
@@ -315,6 +329,7 @@ def main():
     # Collect code diffs
     code_snippets = []
     files_reviewed = 0
+    modified_lines = {}  # Track modified lines per file
     try:
         files = list(pr.get_files())
         logger.info("Found %d files in PR", len(files))
@@ -334,6 +349,36 @@ def main():
                 code_snippets.append(f"File: {file.filename}\n{file.patch}")
                 files_reviewed += 1
                 logger.debug("Patch for %s: %s", file.filename, file.patch)
+
+                # Parse the patch to get modified line numbers and positions
+                modified_lines[file.filename] = {}  # Map line numbers to positions in diff
+                position = 0
+                for hunk in file.patch.split("\n@@")[1:]:  # Split into hunks
+                    try:
+                        # Extract the hunk header
+                        hunk_lines = hunk.split("\n")
+                        hunk_header = hunk_lines[0].strip()
+                        # Parse the new file line numbers:
+                        # @@ -old_start,old_count +new_start,new_count @@
+                        new_range = hunk_header.split("+")[1].split("@@")[0].strip()
+                        new_start = int(new_range.split(",")[0])
+
+                        # Process the hunk content
+                        current_line = new_start
+                        for line in hunk_lines[1:]:
+                            if not line:
+                                continue
+                            position += 1
+                            if line.startswith("+"):
+                                modified_lines[file.filename][current_line] = position
+                                current_line += 1
+                            elif line.startswith("-"):
+                                continue
+                            else:
+                                current_line += 1
+                    except (IndexError, ValueError) as e:
+                        logger.warning("Error parsing hunk header in %s: %s", file.filename, str(e))
+                        logger.debug("Problematic hunk: %s", hunk)
             else:
                 logger.warning("No patch available for file: %s", file.filename)
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -341,6 +386,7 @@ def main():
         sys.exit(1)
 
     logger.info("Collected snippets from %d files", files_reviewed)
+    logger.info("Modified lines per file: %s", {k: sorted(v) for k, v in modified_lines.items()})
     # Set files_reviewed output
     set_output("files_reviewed", str(files_reviewed))
 
@@ -374,6 +420,15 @@ def main():
         prompt = (
             "Review the following pull request and provide structured feedback. "
             "Focus on providing specific, actionable feedback that helps improve code quality. "
+            "CRITICAL: You MUST ONLY comment on the following modified line numbers "
+            "in each file:\n"
+            f"{
+                chr(10).join(
+                    [f'- {file}: {sorted(lines)}' for file, lines in modified_lines.items()]
+                )
+            }\n"
+            "Any comments on other line numbers will be rejected. "
+            "Your line numbers MUST exactly match these modified lines. "
             "Approve if the code is well-written, but always suggest improvements where possible. "
             "Be direct and clear in your feedback.\n\n"
             f"PR Title: {pr.title}\n"
@@ -398,7 +453,11 @@ def main():
             ],
             response_format={
                 "type": "json_schema",
-                "json_schema": {"strict": True, "schema": json_schema},
+                "json_schema": {
+                    "name": "review_schema",
+                    "strict": True,
+                    "schema": json_schema,
+                },
             },
         )
 
@@ -411,6 +470,28 @@ def main():
         try:
             if review_type == ReviewType.INDIVIDUAL:
                 review = IndividualReview(**review_data)
+                # Validate line numbers in comments
+                invalid_comments = []
+                for comment in review.comments:
+                    if comment.file not in modified_lines:
+                        logger.warning("Comment references non-modified file: %s", comment.file)
+                        invalid_comments.append(comment)
+                    elif comment.line not in modified_lines[comment.file]:
+                        logger.warning(
+                            "Comment references non-modified line %d in file %s. "
+                            "Modified lines are: %s",
+                            comment.line,
+                            comment.file,
+                            sorted(modified_lines[comment.file].keys()),
+                        )
+                        invalid_comments.append(comment)
+
+                if invalid_comments:
+                    logger.warning(
+                        "Removing %d comments that reference non-modified lines",
+                        len(invalid_comments),
+                    )
+                    review.comments = [c for c in review.comments if c not in invalid_comments]
             else:
                 review = SummarizedReview(**review_data)
             logger.info("Successfully validated review data")
@@ -440,6 +521,7 @@ def main():
                     commit=latest_commit.sha,
                     event=review_event,
                 )
+                logger.info("Successfully posted summarized review")
             else:
                 logger.info("Posting individual review comments")
                 # Post individual comments
@@ -447,14 +529,43 @@ def main():
 
                 for comment in review.comments:
                     try:
-                        logger.info("Posting comment for %s:%d", comment.file, comment.line)
-                        pr.create_review_comment(
-                            body=comment.comment,
-                            commit=latest_commit.sha,
-                            path=comment.file,
-                            line=comment.line,
+                        logger.info(
+                            "Attempting to post comment for %s:%d: %s",
+                            comment.file,
+                            comment.line,
+                            comment.comment,
                         )
-                        logger.info("Successfully posted comment")
+                        # Use GitHub REST API directly to create review comment
+                        url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/comments"
+                        headers = {
+                            "Accept": "application/vnd.github.v3+json",
+                            "Authorization": f"Bearer {github_token}",
+                        }
+                        data = {
+                            "body": comment.comment,
+                            "commit_id": latest_commit.sha,
+                            "path": comment.file,
+                            "line": comment.line,
+                            "side": "RIGHT",
+                        }
+
+                        response = requests.post(url, headers=headers, json=data, timeout=30)
+                        if response.status_code >= 400:
+                            logger.warning(
+                                "Failed to post comment on %s:%s: %s",
+                                comment.file,
+                                comment.line,
+                                response.text,
+                            )
+                            failed_comments.append(
+                                f"{comment.file}:{comment.line} - {comment.comment}"
+                            )
+                        else:
+                            logger.info(
+                                "Successfully posted comment for %s:%d",
+                                comment.file,
+                                comment.line,
+                            )
                     except Exception as e:
                         logger.warning(
                             "Failed to post comment on %s:%s: %s",
@@ -462,26 +573,34 @@ def main():
                             comment.line,
                             str(e),
                         )
+                        if hasattr(e, "data"):
+                            logger.warning("Error data: %s", e.data)
+                        if hasattr(e, "status"):
+                            logger.warning("Error status: %s", e.status)
+                        logger.warning("Error type: %s", type(e).__name__)
                         failed_comments.append(f"{comment.file}:{comment.line} - {comment.comment}")
 
-                # Create the final review with verdict
-                try:
-                    logger.info("Creating final review with verdict: %s", review.verdict)
-                    body = format_review_body(review, failed_comments)
-                    logger.info("Review body length: %d", len(body))
-                    pr.create_review(
-                        body=body,
-                        commit=latest_commit.sha,
-                        event=review_event,
-                    )
-                    logger.info("Successfully posted final review")
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    logger.error("Error posting review. Details: %s", str(e))
-                    logger.error("Review body: %s", body)
+                # Create the final review with verdict using GitHub REST API
+                url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews"
+                headers = {
+                    "Accept": "application/vnd.github.v3+json",
+                    "Authorization": f"Bearer {github_token}",
+                }
+                data = {
+                    "body": format_review_body(review, failed_comments),
+                    "commit_id": latest_commit.sha,
+                    "event": review_event,
+                }
+                response = requests.post(url, headers=headers, json=data, timeout=30)
+                if response.status_code >= 400:
+                    logger.error("Error posting review. Details: %s", response.text)
+                    logger.error("Review body: %s", format_review_body(review, failed_comments))
                     logger.error("Verdict: %s", review.verdict)
                     logger.error("Review event: %s", review_event)
                     logger.error("Commit SHA: %s", latest_commit.sha)
                     sys.exit(1)
+                else:
+                    logger.info("Successfully posted final review")
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Error in review process: %s", str(e))
