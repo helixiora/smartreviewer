@@ -1,0 +1,41 @@
+---
+# Default state for all rules
+default: true
+
+# MD013/line-length - Line length
+MD013:
+  # Number of characters
+  line_length: 100
+  # Allow long code blocks
+  code_blocks: false
+  # Allow long tables
+  tables: false
+
+# MD024/no-duplicate-heading/no-duplicate-header - Multiple headings with the same content
+MD024:
+  # Allow different nesting
+  allow_different_nesting: true
+
+# MD033/no-inline-html - Inline HTML
+MD033:
+  # Allow specific elements
+  allowed_elements:
+    - br
+
+# MD041/first-line-heading/first-line-h1 - First line in a file should be a top-level heading
+MD041:
+  # Ignore files that start with front matter
+  front_matter_title: "^\\s*title:"
+
+# MD029/ol-prefix - Ordered list item prefix
+MD029: false
+
+# MD007/ul-indent - Unordered list indentation
+MD007:
+  # Indent sublists by 2 spaces
+  indent: 2
+
+# MD046/code-block-style - Code block style
+MD046:
+  # Use fenced code blocks
+  style: "fenced"

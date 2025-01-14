@@ -3,9 +3,6 @@ description: 'Automatically review pull requests using AI to provide detailed fe
 author: 'helixiora'
 
 inputs:
-  github_token:
-    description: 'GitHub token for API access'
-    required: true
   openai_api_key:
     description: 'OpenAI API key'
     required: true
@@ -26,8 +23,8 @@ runs:
   using: 'docker'
   image: 'Dockerfile'
   env:
-    GITHUB_TOKEN: ${{ inputs.github_token }}
+    GITHUB_TOKEN: ${{ github.token }}
     OPENAI_API_KEY: ${{ inputs.openai_api_key }}
     REPO_NAME: ${{ inputs.repo_name }}
     PR_NUMBER: ${{ inputs.pr_number }}
-    DRY_RUN: ${{ inputs.dry_run }} 
+    DRY_RUN: ${{ inputs.dry_run }}

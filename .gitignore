@@ -29,10 +29,29 @@ venv/
 ENV/
 env/
 .venv/
+.env/
+env.bak/
+venv.bak/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-*~ 
+*~
+
+# Testing
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Misc
+.DS_Store
+Thumbs.db

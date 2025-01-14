@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      dev-dependencies:
+        patterns:
+          - "pytest*"
+          - "ruff"
+          - "pylint"
+          - "bandit"
+          - "pre-commit"
+          - "mypy"
+          - "types-*"
+      core-dependencies:
+        patterns:
+          - "openai"
+          - "PyGithub"
+          - "python-dotenv"
+          - "PyYAML"
+          - "tenacity"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
