@@ -1,5 +1,5 @@
 # Core dependencies
-openai==1.59.7
+openai==1.61.0
 PyGithub==2.5.0
 python-dotenv==1.0.1
 PyYAML==6.0.2
