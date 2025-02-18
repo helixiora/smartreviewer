@@ -1,6 +1,6 @@
 # Core dependencies
-openai==1.59.7
-PyGithub==2.5.0
+openai==1.63.2
+PyGithub==2.6.0
 python-dotenv==1.0.1
 PyYAML==6.0.2
 tenacity==9.0.0
