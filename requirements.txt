@@ -7,13 +7,13 @@ tenacity==9.0.0
 pydantic==2.10.6
 
 # Development dependencies
-pytest==8.3.4
+pytest==8.3.5
 pytest-cov==6.0.0
-ruff==0.9.1
-pylint==3.3.3
-bandit==1.8.2
-pre-commit==4.0.1
+ruff==0.9.9
+pylint==3.3.4
+bandit==1.8.3
+pre-commit==4.1.0
 
 # Type stubs for development
 types-PyYAML==6.0.12.20241230
-types-requests==2.32.0.20241016
+types-requests==2.32.0.20250301
